@@ -37,6 +37,7 @@
 #include <scsi/sg.h>
 #include <scsi/scsi.h>
 #include <sys/ioctl.h>
+#include <dirent.h> 
 #include <fcntl.h>
 #include <string.h>
 #include <unistd.h>
@@ -309,7 +310,10 @@ int ltotape_map_st2sg (const char *devname, char *sgdevname)
   int   sg_devtype = 0;
   char *nstdevname = NULL;
   char *temp = NULL;
+  char *sysfsname = NULL;
   FILE *fp = NULL;
+  DIR *d;
+  struct dirent *dir;
 
   struct sidl {
     int four_in_one;
@@ -396,15 +400,7 @@ int ltotape_map_st2sg (const char *devname, char *sgdevname)
       }
       return -EDEV_DRIVER_ERROR;
 
-    } else if ((fp = fopen ("/proc/scsi/sg/devices", "rb")) == (FILE *)NULL) {
-      ltfsmsg (LTFS_ERR, "20032E", devname, "Unable to open /proc/scsi/sg/devices");
-      if (allocated) {
-        free (nstdevname); 
-        nstdevname = NULL;
-      }
-      return -EDEV_INTERNAL_ERROR;
-
-    } else {
+    } else if ((fp = fopen ("/proc/scsi/sg/devices", "rb")) != (FILE *)NULL) {
       i = 0;
       dev_scsi_id = (devinfo.four_in_one & 0xFF);
       dev_lun     = (devinfo.four_in_one >> 8) & 0xFF;
@@ -438,6 +434,59 @@ int ltotape_map_st2sg (const char *devname, char *sgdevname)
         }
         return DEVICE_GOOD;
       }
+    } else {
+      ltfsmsg (LTFS_ERR, "20032E", devname, "Unable to open /proc/scsi/sg/devices - trying sysfs");
+
+      outcome = asprintf (&sysfsname, "/sys/class/scsi_tape/%s/device/scsi_generic", nstdevname + strlen ("/dev/"));
+      if ((outcome == -1) || (!sysfsname)) {   /* Low on memory or other error. Return failure. */
+        ltfsmsg (LTFS_ERR, "20100E");
+        if (allocated) {
+          free (nstdevname); 
+          nstdevname = NULL;
+        }
+        sgdevname = NULL;
+        return -EDEV_NO_MEMORY;
+      }
+
+      d = opendir(sysfsname);
+      if (!d) {
+        ltfsmsg (LTFS_ERR, "20032E", devname, sysfsname);
+        if (allocated) {
+          free (nstdevname); 
+          nstdevname = NULL;
+        }
+        free(sysfsname);
+        sysfsname = NULL;
+        return -EDEV_INTERNAL_ERROR;
+      }
+
+      found = FALSE;
+      while ((dir = readdir(d)) != NULL) {
+        if (strncmp(dir->d_name, "sg", strlen("sg")) == 0) {
+          sprintf(sgdevname, "/dev/%s", dir->d_name);
+          found = TRUE;
+          break;
+        }
+      }
+
+      closedir(d);
+      free(sysfsname);
+      sysfsname = NULL;
+
+      if (!found) {
+        if (allocated) {
+          free (nstdevname); 
+          nstdevname = NULL;
+        }
+        return -EDEV_DEVICE_UNSUPPORTABLE;
+      }
+
+      ltfsmsg (LTFS_DEBUG, "20034D", nstdevname, sgdevname, dev_host_no, dev_channel, dev_scsi_id, dev_lun);
+      if (allocated) {
+        free (nstdevname); 
+        nstdevname = NULL;
+      }
+      return DEVICE_GOOD;
     }
   }
 }
